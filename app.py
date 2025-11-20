@@ -1,136 +1,65 @@
 import streamlit as st
-import face_recognition
-import numpy as np
-import pickle
 import cv2
-import os
+import torch
+from transformers import AutoModelForObjectDetection, AutoImageProcessor
+from huggingface_hub import hf_hub_download
 from PIL import Image
+import numpy as np
 
-DATA_FILE = "face_data.pkl"
+st.set_page_config(page_title="Live Vehicle Detection", layout="wide")
 
+st.title("🚗 Live Vehicle Detection using Hugging Face Model")
+st.write("Real-time vehicle detection using YOLOv8 from Hugging Face Hub")
 
-# -------------------------------------------------------
-# Helper: Load stored encodings
-# -------------------------------------------------------
-def load_face_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "rb") as f:
-            return pickle.load(f)
-    return {}
+# ---- Load Model ----
+MODEL_ID = "keremberke/yolov8n-vehicle-detection"
 
+@st.cache_resource
+def load_model():
+    processor = AutoImageProcessor.from_pretrained(MODEL_ID)
+    model = AutoModelForObjectDetection.from_pretrained(MODEL_ID)
+    return processor, model
 
-# -------------------------------------------------------
-# Helper: Save encodings
-# -------------------------------------------------------
-def save_face_data(data):
-    with open(DATA_FILE, "wb") as f:
-        pickle.dump(data, f)
+processor, model = load_model()
 
+run_live = st.checkbox("Start Live Vehicle Detection")
 
-# -------------------------------------------------------
-# Face registration
-# -------------------------------------------------------
-def register_face(name, image):
-    np_image = np.array(image)
-    rgb_image = np_image[:, :, ::-1]
+FRAME_WINDOW = st.image([])
 
-    encodings = face_recognition.face_encodings(rgb_image)
+# ---- Webcam detection loop ----
+if run_live:
+    cap = cv2.VideoCapture(0)
 
-    if len(encodings) == 0:
-        return False, "❌ No face detected in image!"
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            st.error("Failed to access webcam!")
+            break
 
-    data = load_face_data()
-    data[name] = encodings[0]
-    save_face_data(data)
+        # Convert image BGR → RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb_frame)
 
-    return True, f"✅ Face for '{name}' has been saved!"
+        # Process prediction
+        inputs = processor(images=pil_img, return_tensors="pt")
+        outputs = model(**inputs)
 
+        result = processor.post_process_object_detection(
+            outputs,
+            threshold=0.4,
+            target_sizes=[pil_img.size[::-1]]
+        )[0]
 
-# -------------------------------------------------------
-# Face recognition
-# -------------------------------------------------------
-def recognize_face(image):
-    data = load_face_data()
+        # Draw boxes
+        for score, label, box in zip(result["scores"], result["labels"], result["boxes"]):
+            score = float(score)
+            label_name = model.config.id2label[label.item()]
+            x1, y1, x2, y2 = map(int, box.tolist())
 
-    if not data:
-        return False, "❌ No trained faces found!", None
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+            cv2.putText(frame, f"{label_name} {score:.2f}", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
-    known_names = list(data.keys())
-    known_encodings = list(data.values())
+        FRAME_WINDOW.image(frame, channels="BGR")
 
-    np_image = np.array(image)
-    rgb_image = np_image[:, :, ::-1]
-
-    face_locations = face_recognition.face_locations(rgb_image)
-    face_encodings = face_recognition.face_encodings(rgb_image, face_locations)
-
-    if len(face_encodings) == 0:
-        return False, "❌ No face detected in test image!", None
-
-    test_encoding = face_encodings[0]
-
-    matches = face_recognition.compare_faces(known_encodings, test_encoding)
-    distances = face_recognition.face_distance(known_encodings, test_encoding)
-
-    name = "Unknown"
-    if True in matches:
-        best_index = np.argmin(distances)
-        name = known_names[best_index]
-
-    # Draw rectangle on face
-    for (top, right, bottom, left) in face_locations:
-        cv2.rectangle(np_image, (left, top), (right, bottom), (0, 255, 0), 3)
-        cv2.putText(np_image, name, (left, top - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-    return True, name, np_image
-
-
-# -------------------------------------------------------
-# Streamlit UI
-# -------------------------------------------------------
-st.title("🧠 Face Registration & Recognition App")
-st.write("Upload an image to **train** a face or **detect** a face.")
-
-tab1, tab2 = st.tabs(["📌 Register a New Face", "🔍 Recognize a Face"])
-
-
-# ---------------- REGISTER TAB ------------------------
-with tab1:
-    st.header("Register a Face")
-
-    name = st.text_input("Enter name of the person:")
-    image_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
-
-    if st.button("Register Face"):
-        if name.strip() == "":
-            st.error("Please enter a name.")
-        elif image_file is None:
-            st.error("Please upload an image.")
-        else:
-            image = Image.open(image_file)
-            success, message = register_face(name, image)
-            if success:
-                st.success(message)
-            else:
-                st.error(message)
-
-
-# ---------------- RECOGNIZE TAB ------------------------
-with tab2:
-    st.header("Recognize Face")
-
-    test_image_file = st.file_uploader("Upload a test image", type=["jpg", "jpeg", "png"])
-
-    if st.button("Detect Face"):
-        if test_image_file is None:
-            st.error("Please upload an image first.")
-        else:
-            image = Image.open(test_image_file)
-            success, result, output_img = recognize_face(image)
-
-            if not success:
-                st.error(result)
-            else:
-                st.success(f"🎉 Detected Person: **{result}**")
-                st.image(output_img, caption="Recognition Result")
+    cap.release()
