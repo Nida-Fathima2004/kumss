@@ -1,13 +1,9 @@
 import streamlit as st
-import cv2
-import time
 from transformers import AutoModelForObjectDetection, AutoImageProcessor
 from PIL import Image
 import numpy as np
 
-
-st.set_page_config(page_title="Live Vehicle Detection", layout="wide")
-st.title("🚗 Live Vehicle Detection (Hugging Face Model)")
+st.title("🚗 Vehicle Detection (Hugging Face Model)")
 
 MODEL_ID = "keremberke/yolov8n-vehicle-detection"
 
@@ -19,39 +15,30 @@ def load_model():
 
 processor, model = load_model()
 
-start = st.button("Start Webcam")
-FRAME_WINDOW = st.image([])
+img = st.camera_input("Capture vehicle image")
 
-if start:
-    cap = cv2.VideoCapture(0)
-    st.write("Webcam started. Stop the app to restart.")
+if img:
+    image = Image.open(img)
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Could not read from webcam.")
-            st.stop()
+    inputs = processor(images=image, return_tensors="pt")
+    outputs = model(**inputs)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
+    result = processor.post_process_object_detection(
+        outputs, threshold=0.4,
+        target_sizes=[image.size[::-1]]
+    )[0]
 
-        inputs = processor(images=pil, return_tensors="pt")
-        outputs = model(**inputs)
+    image_np = np.array(image)
 
-        result = processor.post_process_object_detection(
-            outputs,
-            threshold=0.4,
-            target_sizes=[pil.size[::-1]]
-        )[0]
+    # Draw boxes manually
+    import cv2
 
-        # Draw boxes
-        for score, label, box in zip(result["scores"], result["labels"], result["boxes"]):
-            x1, y1, x2, y2 = map(int, box.tolist())
-            name = model.config.id2label[label.item()]
+    for score, label, box in zip(result["scores"], result["labels"], result["boxes"]):
+        x1, y1, x2, y2 = map(int, box.tolist())
+        name = model.config.id2label[label.item()]
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
-            cv2.putText(frame, f"{name} {float(score):.2f}", (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+        cv2.rectangle(image_np, (x1, y1), (x2, y2), (0,255,0), 2)
+        cv2.putText(image_np, f"{name} {float(score):.2f}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-        FRAME_WINDOW.image(frame, channels="BGR")
-        time.sleep(0.02)
+    st.image(image_np, caption="Detected Vehicles")
